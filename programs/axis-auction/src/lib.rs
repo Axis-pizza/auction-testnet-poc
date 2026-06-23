@@ -4,9 +4,9 @@
 
 //! Axis Auction Testnet POC.
 //!
-//! T0-3 adds the Anchor account model only. Instruction handlers, token
-//! transfers, deployment, and external liquidity integrations remain out of
-//! scope until later milestones.
+//! T0-4 adds only the initial account-creation lifecycle. Bidding, winner
+//! selection, settlement, payment, deployment, and external liquidity
+//! integrations remain out of scope until later milestones.
 
 use anchor_lang::prelude::*;
 
@@ -15,12 +15,68 @@ declare_id!("AxisAuct111111111111111111111111111111111111");
 pub mod constants;
 pub mod errors;
 pub mod events;
+pub mod instructions;
 pub mod math;
 pub mod state;
 
+use instructions::*;
+
 /// Axis Auction program surface.
 ///
-/// T0-3 intentionally has no instruction handlers. This module establishes a
-/// stable Anchor program boundary while the account model is reviewed.
+/// T0-4 establishes config, market, and auction-round creation only.
 #[program]
-pub mod axis_auction {}
+pub mod axis_auction {
+    use super::*;
+
+    pub fn initialize_config(
+        ctx: Context<InitializeConfig>,
+        usdc_mint: Pubkey,
+        protocol_fee_bps: u16,
+        default_auction_duration_slots: u64,
+        min_bid_amount: u64,
+        min_improvement_bps: u16,
+    ) -> Result<()> {
+        instructions::initialize_config::initialize_config(
+            ctx,
+            usdc_mint,
+            protocol_fee_bps,
+            default_auction_duration_slots,
+            min_bid_amount,
+            min_improvement_bps,
+        )
+    }
+
+    pub fn create_mock_market(
+        ctx: Context<CreateMockMarket>,
+        market_id: u64,
+        market_kind: u8,
+        usdc_mint: Pubkey,
+        batch_size: u64,
+        pre_nav: u64,
+        target_nav: u64,
+        mock_pool_price: u64,
+        expected_cost_without_auction: u64,
+        max_nav_staleness_slots: u64,
+        min_settlement_out: u64,
+        min_improvement_bps: u16,
+    ) -> Result<()> {
+        instructions::create_mock_market::create_mock_market(
+            ctx,
+            market_id,
+            market_kind,
+            usdc_mint,
+            batch_size,
+            pre_nav,
+            target_nav,
+            mock_pool_price,
+            expected_cost_without_auction,
+            max_nav_staleness_slots,
+            min_settlement_out,
+            min_improvement_bps,
+        )
+    }
+
+    pub fn open_auction_round(ctx: Context<OpenAuctionRound>, duration_slots: u64) -> Result<()> {
+        instructions::open_auction_round::open_auction_round(ctx, duration_slots)
+    }
+}

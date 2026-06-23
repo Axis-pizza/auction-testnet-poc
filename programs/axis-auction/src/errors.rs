@@ -40,4 +40,12 @@ pub enum AxisAuctionError {
     PaymentAlreadyRecorded,
     #[msg("The market kind is not supported by this POC.")]
     InvalidMarketKind,
+    #[msg("Auction duration must be greater than zero.")]
+    InvalidAuctionDuration,
+    #[msg("Batch size must be greater than zero.")]
+    InvalidBatchSize,
+    #[msg("Maximum NAV staleness must be greater than zero.")]
+    InvalidMaxNavStaleness,
+    #[msg("Minimum improvement basis points must not exceed 10,000.")]
+    InvalidMinImprovementBps,
 }

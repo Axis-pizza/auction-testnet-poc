@@ -6,8 +6,10 @@ use anchor_lang::prelude::*;
 
 #[event]
 pub struct ConfigInitialized {
+    pub config: Pubkey,
     pub authority: Pubkey,
     pub protocol_revenue_vault: Pubkey,
+    pub usdc_mint: Pubkey,
     pub protocol_fee_bps: u16,
     pub default_auction_duration_slots: u64,
     pub min_bid_amount: u64,
@@ -27,6 +29,10 @@ pub struct MarketCreated {
     pub target_nav: u64,
     pub mock_pool_price: u64,
     pub expected_cost_without_auction: u64,
+    pub nav_last_update_slot: u64,
+    pub max_nav_staleness_slots: u64,
+    pub min_settlement_out: u64,
+    pub min_improvement_bps: u16,
 }
 
 #[event]
