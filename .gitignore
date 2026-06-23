@@ -13,6 +13,7 @@
 # Secrets / keypairs / wallets
 .env
 .env.*
+!.env.example
 *.keypair.json
 *-keypair.json
 id.json
@@ -25,4 +26,3 @@ wallet.json
 .DS_Store
 .idea/
 .vscode/
-

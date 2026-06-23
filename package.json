@@ -1,0 +1,27 @@
+{
+  "name": "axis-auction-testnet-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lifecycle and observability clients for the Axis Auction Testnet POC.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "init": "tsx scripts/01_init.ts",
+    "create-market": "tsx scripts/02_create_market.ts",
+    "open-round": "tsx scripts/03_open_round.ts",
+    "submit-bids": "tsx scripts/04_submit_bids.ts",
+    "close-select-winner": "tsx scripts/05_close_select_winner.ts",
+    "execute-settlement": "tsx scripts/06_execute_settlement.ts",
+    "record-payment": "tsx scripts/07_record_payment.ts",
+    "full-flow": "tsx scripts/99_full_flow.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@solana/web3.js": "1.98.2",
+    "dotenv": "16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.10",
+    "tsx": "4.19.3",
+    "typescript": "5.7.3"
+  }
+}
