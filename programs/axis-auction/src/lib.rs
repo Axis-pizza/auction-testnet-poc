@@ -4,9 +4,9 @@
 
 //! Axis Auction Testnet POC.
 //!
-//! T0-4 adds only the initial account-creation lifecycle. Bidding, winner
-//! selection, settlement, payment, deployment, and external liquidity
-//! integrations remain out of scope until later milestones.
+//! T0-5 adds bidding and winner authorization. Settlement, payment,
+//! deployment, and external liquidity integrations remain out of scope until
+//! later milestones.
 
 use anchor_lang::prelude::*;
 
@@ -23,7 +23,8 @@ use instructions::*;
 
 /// Axis Auction program surface.
 ///
-/// T0-4 establishes config, market, and auction-round creation only.
+/// T0-5 establishes config/market/round creation, bidding, and winner
+/// authorization only.
 #[program]
 pub mod axis_auction {
     use super::*;
@@ -78,5 +79,13 @@ pub mod axis_auction {
 
     pub fn open_auction_round(ctx: Context<OpenAuctionRound>, duration_slots: u64) -> Result<()> {
         instructions::open_auction_round::open_auction_round(ctx, duration_slots)
+    }
+
+    pub fn submit_bid(ctx: Context<SubmitBid>, amount: u64) -> Result<()> {
+        instructions::submit_bid::submit_bid(ctx, amount)
+    }
+
+    pub fn close_auction_select_winner(ctx: Context<CloseAuctionSelectWinner>) -> Result<()> {
+        instructions::close_auction_select_winner::close_auction_select_winner(ctx)
     }
 }

@@ -3,20 +3,23 @@ use std::error::Error;
 use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use axis_auction::{
     accounts::{
+        CloseAuctionSelectWinner as CloseAuctionSelectWinnerAccounts,
         CreateMockMarket as CreateMockMarketAccounts, InitializeConfig as InitializeConfigAccounts,
-        OpenAuctionRound as OpenAuctionRoundAccounts,
+        OpenAuctionRound as OpenAuctionRoundAccounts, SubmitBid as SubmitBidAccounts,
     },
     constants::{
-        CONFIG_SEED, CREATOR_VAULT_SEED, MARKET_KIND_BATCH_CLEARING_RIGHT, MARKET_SEED,
-        PROTOCOL_VAULT_SEED, ROUND_SEED,
+        BID_SEED, CONFIG_SEED, CREATOR_VAULT_SEED, MARKET_KIND_BATCH_CLEARING_RIGHT, MARKET_SEED,
+        PROTOCOL_VAULT_SEED, ROUND_SEED, WINNER_SEED,
     },
     instruction::{
+        CloseAuctionSelectWinner as CloseAuctionSelectWinnerInstruction,
         CreateMockMarket as CreateMockMarketInstruction,
         InitializeConfig as InitializeConfigInstruction,
-        OpenAuctionRound as OpenAuctionRoundInstruction,
+        OpenAuctionRound as OpenAuctionRoundInstruction, SubmitBid as SubmitBidInstruction,
     },
     state::{
-        AuctionConfig, AuctionRound, CreatorRevenueVault, MockDtfMarket, ProtocolRevenueVault,
+        AuctionConfig, AuctionRound, BidRecord, CreatorRevenueVault, MockDtfMarket,
+        ProtocolRevenueVault, WinnerAuthorization,
     },
 };
 use solana_program_test::{processor, ProgramTest, ProgramTestContext};
@@ -90,6 +93,18 @@ fn round_address(market: &Pubkey, round_index: u64) -> Pubkey {
         &axis_auction::id(),
     )
     .0
+}
+
+fn bid_address(round: &Pubkey, bidder: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[BID_SEED, round.as_ref(), bidder.as_ref()],
+        &axis_auction::id(),
+    )
+    .0
+}
+
+fn winner_authorization_address(round: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[WINNER_SEED, round.as_ref()], &axis_auction::id()).0
 }
 
 fn initialize_config_instruction(authority: Pubkey, protocol_fee_bps: u16) -> Instruction {
@@ -170,6 +185,46 @@ fn open_auction_round_instruction(
     }
 }
 
+fn submit_bid_instruction(
+    bidder: Pubkey,
+    market: Pubkey,
+    round: Pubkey,
+    amount: u64,
+) -> Instruction {
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: SubmitBidAccounts {
+            bidder,
+            config: config_address(),
+            market,
+            auction_round: round,
+            bid_record: bid_address(&round, &bidder),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: SubmitBidInstruction { amount }.data(),
+    }
+}
+
+fn close_auction_select_winner_instruction(
+    closer: Pubkey,
+    market: Pubkey,
+    round: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: CloseAuctionSelectWinnerAccounts {
+            closer,
+            market,
+            auction_round: round,
+            winner_authorization: winner_authorization_address(&round),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: CloseAuctionSelectWinnerInstruction {}.data(),
+    }
+}
+
 async fn process_instructions(
     context: &mut ProgramTestContext,
     instructions: Vec<Instruction>,
@@ -225,6 +280,25 @@ async fn create_valid_market(
     );
     process_instructions(context, vec![ix], &[]).await.unwrap();
     market_address(market_id)
+}
+
+async fn fund(context: &mut ProgramTestContext, recipient: Pubkey) {
+    let transfer = system_instruction::transfer(&context.payer.pubkey(), &recipient, 1_000_000_000);
+    process_instructions(context, vec![transfer], &[])
+        .await
+        .unwrap();
+}
+
+async fn open_valid_round(
+    context: &mut ProgramTestContext,
+    duration_slots: u64,
+) -> (Pubkey, Pubkey) {
+    initialize_valid_config(context).await;
+    let market = create_valid_market(context, MARKET_ID, MAX_NAV_STALENESS_SLOTS).await;
+    let round = round_address(&market, 0);
+    let ix = open_auction_round_instruction(context.payer.pubkey(), market, 0, duration_slots);
+    process_instructions(context, vec![ix], &[]).await.unwrap();
+    (market, round)
 }
 
 #[tokio::test]
@@ -402,4 +476,119 @@ async fn rejects_invalid_or_unauthorized_round_opening() {
     assert!(process_instructions(&mut context, vec![stale_ix], &[])
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn bids_update_records_and_closure_authorizes_the_highest_bidder() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 20).await;
+    let bidder_a = Keypair::new();
+    let bidder_b = Keypair::new();
+    fund(&mut context, bidder_a.pubkey()).await;
+    fund(&mut context, bidder_b.pubkey()).await;
+
+    let first_bid = submit_bid_instruction(bidder_a.pubkey(), market, round_address, 1_000_000);
+    process_instructions(&mut context, vec![first_bid], &[&bidder_a])
+        .await
+        .unwrap();
+
+    let improved_bid = submit_bid_instruction(bidder_a.pubkey(), market, round_address, 2_000_000);
+    process_instructions(&mut context, vec![improved_bid], &[&bidder_a])
+        .await
+        .unwrap();
+
+    let winning_bid = submit_bid_instruction(bidder_b.pubkey(), market, round_address, 3_500_000);
+    process_instructions(&mut context, vec![winning_bid], &[&bidder_b])
+        .await
+        .unwrap();
+
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    let bidder_a_record: BidRecord = fetch_account(
+        &mut context,
+        bid_address(&round_address, &bidder_a.pubkey()),
+    )
+    .await;
+    assert_eq!(round.bid_count, 2);
+    assert_eq!(round.highest_bid, 3_500_000);
+    assert_eq!(round.highest_bidder, bidder_b.pubkey());
+    assert_eq!(bidder_a_record.amount, 2_000_000);
+
+    context.warp_to_slot(round.close_after_slot).unwrap();
+    let close =
+        close_auction_select_winner_instruction(context.payer.pubkey(), market, round_address);
+    process_instructions(&mut context, vec![close], &[])
+        .await
+        .unwrap();
+
+    let closed_round: AuctionRound = fetch_account(&mut context, round_address).await;
+    let authorization: WinnerAuthorization =
+        fetch_account(&mut context, winner_authorization_address(&round_address)).await;
+    assert_eq!(closed_round.status, AuctionRound::STATUS_CLOSED);
+    assert_eq!(authorization.round, round_address);
+    assert_eq!(authorization.market, market);
+    assert_eq!(authorization.winner, bidder_b.pubkey());
+    assert_eq!(authorization.bid_amount, 3_500_000);
+    assert!(!authorization.consumed);
+}
+
+#[tokio::test]
+async fn rejects_low_or_expired_bids() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 20).await;
+    let bidder_a = Keypair::new();
+    let bidder_b = Keypair::new();
+    fund(&mut context, bidder_a.pubkey()).await;
+    fund(&mut context, bidder_b.pubkey()).await;
+
+    let below_min = submit_bid_instruction(bidder_a.pubkey(), market, round_address, 999_999);
+    assert!(
+        process_instructions(&mut context, vec![below_min], &[&bidder_a])
+            .await
+            .is_err()
+    );
+
+    let first_bid = submit_bid_instruction(bidder_a.pubkey(), market, round_address, 1_000_000);
+    process_instructions(&mut context, vec![first_bid], &[&bidder_a])
+        .await
+        .unwrap();
+
+    let insufficient_improvement =
+        submit_bid_instruction(bidder_b.pubkey(), market, round_address, 1_749_999);
+    assert!(
+        process_instructions(&mut context, vec![insufficient_improvement], &[&bidder_b],)
+            .await
+            .is_err()
+    );
+
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    context.warp_to_slot(round.close_after_slot).unwrap();
+    let expired_bid = submit_bid_instruction(bidder_b.pubkey(), market, round_address, 1_750_000);
+    assert!(
+        process_instructions(&mut context, vec![expired_bid], &[&bidder_b])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rejects_early_or_empty_auction_closure() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 20).await;
+
+    let early_close =
+        close_auction_select_winner_instruction(context.payer.pubkey(), market, round_address);
+    assert!(process_instructions(&mut context, vec![early_close], &[])
+        .await
+        .is_err());
+
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    context.warp_to_slot(round.close_after_slot).unwrap();
+    let empty_close =
+        close_auction_select_winner_instruction(context.payer.pubkey(), market, round_address);
+    assert!(process_instructions(&mut context, vec![empty_close], &[])
+        .await
+        .is_err());
+
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    assert_eq!(round.status, AuctionRound::STATUS_OPEN);
 }
