@@ -48,4 +48,6 @@ pub enum AxisAuctionError {
     InvalidMaxNavStaleness,
     #[msg("Minimum improvement basis points must not exceed 10,000.")]
     InvalidMinImprovementBps,
+    #[msg("The winner authorization bid amount does not match the auction round.")]
+    BidMismatch,
 }

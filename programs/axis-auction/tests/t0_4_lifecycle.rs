@@ -1,29 +1,34 @@
 use std::error::Error;
 
-use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
+use anchor_lang::{AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas};
 use axis_auction::{
     accounts::{
         CloseAuctionSelectWinner as CloseAuctionSelectWinnerAccounts,
-        CreateMockMarket as CreateMockMarketAccounts, InitializeConfig as InitializeConfigAccounts,
-        OpenAuctionRound as OpenAuctionRoundAccounts, SubmitBid as SubmitBidAccounts,
+        CreateMockMarket as CreateMockMarketAccounts,
+        ExecuteMockSettlement as ExecuteMockSettlementAccounts,
+        InitializeConfig as InitializeConfigAccounts, OpenAuctionRound as OpenAuctionRoundAccounts,
+        SubmitBid as SubmitBidAccounts,
     },
     constants::{
         BID_SEED, CONFIG_SEED, CREATOR_VAULT_SEED, MARKET_KIND_BATCH_CLEARING_RIGHT, MARKET_SEED,
-        PROTOCOL_VAULT_SEED, ROUND_SEED, WINNER_SEED,
+        PROTOCOL_VAULT_SEED, RECEIPT_SEED, ROUND_SEED, WINNER_SEED,
     },
     instruction::{
         CloseAuctionSelectWinner as CloseAuctionSelectWinnerInstruction,
         CreateMockMarket as CreateMockMarketInstruction,
+        ExecuteMockSettlement as ExecuteMockSettlementInstruction,
         InitializeConfig as InitializeConfigInstruction,
         OpenAuctionRound as OpenAuctionRoundInstruction, SubmitBid as SubmitBidInstruction,
     },
+    math::{calculate_economics, EconomicsInput},
     state::{
         AuctionConfig, AuctionRound, BidRecord, CreatorRevenueVault, MockDtfMarket,
-        ProtocolRevenueVault, WinnerAuthorization,
+        ProtocolRevenueVault, SettlementReceipt, WinnerAuthorization,
     },
 };
 use solana_program_test::{processor, ProgramTest, ProgramTestContext};
 use solana_sdk::{
+    account::{Account, AccountSharedData},
     account_info::AccountInfo,
     entrypoint::ProgramResult,
     instruction::Instruction,
@@ -107,6 +112,10 @@ fn winner_authorization_address(round: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[WINNER_SEED, round.as_ref()], &axis_auction::id()).0
 }
 
+fn receipt_address(round: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[RECEIPT_SEED, round.as_ref()], &axis_auction::id()).0
+}
+
 fn initialize_config_instruction(authority: Pubkey, protocol_fee_bps: u16) -> Instruction {
     Instruction {
         program_id: axis_auction::id(),
@@ -160,6 +169,69 @@ fn create_mock_market_instruction(
             max_nav_staleness_slots,
             min_settlement_out: MIN_SETTLEMENT_OUT,
             min_improvement_bps,
+        }
+        .data(),
+    }
+}
+
+fn create_mock_market_with_settlement_constraints_instruction(
+    creator: Pubkey,
+    market_id: u64,
+    min_settlement_out: u64,
+    min_improvement_bps: u16,
+) -> Instruction {
+    let market = market_address(market_id);
+
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: CreateMockMarketAccounts {
+            creator,
+            market,
+            creator_revenue_vault: creator_vault_address(&market),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: CreateMockMarketInstruction {
+            market_id,
+            market_kind: MARKET_KIND_BATCH_CLEARING_RIGHT,
+            usdc_mint: USDC_MINT,
+            batch_size: BATCH_SIZE,
+            pre_nav: PRE_NAV,
+            target_nav: TARGET_NAV,
+            mock_pool_price: MOCK_POOL_PRICE,
+            expected_cost_without_auction: EXPECTED_COST_WITHOUT_AUCTION,
+            max_nav_staleness_slots: MAX_NAV_STALENESS_SLOTS,
+            min_settlement_out,
+            min_improvement_bps,
+        }
+        .data(),
+    }
+}
+
+fn create_overflow_market_instruction(creator: Pubkey, market_id: u64) -> Instruction {
+    let market = market_address(market_id);
+
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: CreateMockMarketAccounts {
+            creator,
+            market,
+            creator_revenue_vault: creator_vault_address(&market),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: CreateMockMarketInstruction {
+            market_id,
+            market_kind: MARKET_KIND_BATCH_CLEARING_RIGHT,
+            usdc_mint: USDC_MINT,
+            batch_size: u64::MAX,
+            pre_nav: 0,
+            target_nav: u64::MAX,
+            mock_pool_price: 0,
+            expected_cost_without_auction: 0,
+            max_nav_staleness_slots: MAX_NAV_STALENESS_SLOTS,
+            min_settlement_out: 0,
+            min_improvement_bps: 0,
         }
         .data(),
     }
@@ -222,6 +294,28 @@ fn close_auction_select_winner_instruction(
         }
         .to_account_metas(None),
         data: CloseAuctionSelectWinnerInstruction {}.data(),
+    }
+}
+
+fn execute_mock_settlement_instruction(
+    winner: Pubkey,
+    market: Pubkey,
+    round: Pubkey,
+    winner_authorization: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: ExecuteMockSettlementAccounts {
+            winner,
+            config: config_address(),
+            market,
+            auction_round: round,
+            winner_authorization,
+            settlement_receipt: receipt_address(&round),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: ExecuteMockSettlementInstruction {}.data(),
     }
 }
 
@@ -298,6 +392,71 @@ async fn open_valid_round(
     let round = round_address(&market, 0);
     let ix = open_auction_round_instruction(context.payer.pubkey(), market, 0, duration_slots);
     process_instructions(context, vec![ix], &[]).await.unwrap();
+    (market, round)
+}
+
+async fn close_round_for_winner(
+    context: &mut ProgramTestContext,
+    market: Pubkey,
+    round_address: Pubkey,
+    winner: &Keypair,
+    bid_amount: u64,
+) {
+    fund(context, winner.pubkey()).await;
+    let bid = submit_bid_instruction(winner.pubkey(), market, round_address, bid_amount);
+    process_instructions(context, vec![bid], &[winner])
+        .await
+        .unwrap();
+
+    let round: AuctionRound = fetch_account(context, round_address).await;
+    context.warp_to_slot(round.close_after_slot).unwrap();
+    let close =
+        close_auction_select_winner_instruction(context.payer.pubkey(), market, round_address);
+    process_instructions(context, vec![close], &[])
+        .await
+        .unwrap();
+}
+
+fn overwrite_winner_authorization(
+    context: &mut ProgramTestContext,
+    address: Pubkey,
+    authorization: WinnerAuthorization,
+) {
+    let mut data = Vec::new();
+    authorization.try_serialize(&mut data).unwrap();
+    let account = Account {
+        lamports: 10_000_000,
+        data,
+        owner: axis_auction::id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+    context.set_account(&address, &AccountSharedData::from(account));
+}
+
+async fn open_round_with_settlement_constraints(
+    context: &mut ProgramTestContext,
+    market_id: u64,
+    min_settlement_out: u64,
+    min_improvement_bps: u16,
+) -> (Pubkey, Pubkey) {
+    initialize_valid_config(context).await;
+    let create = create_mock_market_with_settlement_constraints_instruction(
+        context.payer.pubkey(),
+        market_id,
+        min_settlement_out,
+        min_improvement_bps,
+    );
+    process_instructions(context, vec![create], &[])
+        .await
+        .unwrap();
+
+    let market = market_address(market_id);
+    let round = round_address(&market, 0);
+    let open = open_auction_round_instruction(context.payer.pubkey(), market, 0, 3);
+    process_instructions(context, vec![open], &[])
+        .await
+        .unwrap();
     (market, round)
 }
 
@@ -591,4 +750,317 @@ async fn rejects_early_or_empty_auction_closure() {
 
     let round: AuctionRound = fetch_account(&mut context, round_address).await;
     assert_eq!(round.status, AuctionRound::STATUS_OPEN);
+}
+
+#[tokio::test]
+async fn mock_settlement_persists_economics_and_consumes_authorization() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 3).await;
+    let winner = Keypair::new();
+    let winner_bid_amount = 1_000_000;
+    close_round_for_winner(
+        &mut context,
+        market,
+        round_address,
+        &winner,
+        winner_bid_amount,
+    )
+    .await;
+
+    let authorization_address = winner_authorization_address(&round_address);
+    let execute = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        market,
+        round_address,
+        authorization_address,
+    );
+    process_instructions(&mut context, vec![execute], &[&winner])
+        .await
+        .unwrap();
+
+    let receipt: SettlementReceipt =
+        fetch_account(&mut context, receipt_address(&round_address)).await;
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    let authorization: WinnerAuthorization =
+        fetch_account(&mut context, authorization_address).await;
+    let expected = calculate_economics(EconomicsInput {
+        batch_size: BATCH_SIZE,
+        pre_nav: PRE_NAV,
+        target_nav: TARGET_NAV,
+        mock_pool_price: MOCK_POOL_PRICE,
+        expected_cost_without_auction: EXPECTED_COST_WITHOUT_AUCTION,
+        winner_bid_amount,
+        protocol_fee_bps: 2_000,
+    })
+    .unwrap();
+
+    assert_eq!(round.status, AuctionRound::STATUS_SETTLED);
+    assert!(authorization.consumed);
+    assert_eq!(receipt.round, round_address);
+    assert_eq!(receipt.market, market);
+    assert_eq!(receipt.winner, winner.pubkey());
+    assert_eq!(receipt.pre_nav, PRE_NAV);
+    assert_eq!(receipt.target_nav, TARGET_NAV);
+    assert_eq!(receipt.mock_pool_price, MOCK_POOL_PRICE);
+    assert_eq!(receipt.batch_size, BATCH_SIZE);
+    assert_eq!(
+        receipt.expected_cost_without_auction,
+        EXPECTED_COST_WITHOUT_AUCTION
+    );
+    assert_eq!(receipt.winner_bid_amount, winner_bid_amount);
+    assert_eq!(receipt.starting_gap_value, expected.starting_gap_value);
+    assert_eq!(receipt.settlement_out, expected.settlement_out);
+    assert_eq!(receipt.settlement_cost, expected.settlement_cost);
+    assert_eq!(receipt.auction_revenue, expected.auction_revenue);
+    assert_eq!(receipt.gap_closed_value, expected.gap_closed_value);
+    assert_eq!(receipt.gross_cost_reduction, expected.gross_cost_reduction);
+    assert_eq!(
+        receipt.total_value_recaptured,
+        expected.total_value_recaptured
+    );
+    assert_eq!(receipt.protocol_revenue, expected.protocol_revenue);
+    assert_eq!(receipt.creator_revenue, expected.creator_revenue);
+    assert_eq!(receipt.net_protocol_benefit, expected.net_protocol_benefit);
+    assert_eq!(receipt.net_creator_benefit, expected.net_creator_benefit);
+    assert_eq!(receipt.improvement_bps, expected.improvement_bps);
+
+    let protocol_vault: ProtocolRevenueVault =
+        fetch_account(&mut context, protocol_vault_address()).await;
+    let creator_vault: CreatorRevenueVault =
+        fetch_account(&mut context, creator_vault_address(&market)).await;
+    assert_eq!(protocol_vault.total_in, 0);
+    assert_eq!(creator_vault.total_in, 0);
+
+    let second_execution = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        market,
+        round_address,
+        authorization_address,
+    );
+    // Make the transaction message distinct so ProgramTest cannot return the
+    // cached result for the first, otherwise identical execution.
+    let nonce_transfer = system_instruction::transfer(&context.payer.pubkey(), &winner.pubkey(), 1);
+    assert!(process_instructions(
+        &mut context,
+        vec![nonce_transfer, second_execution],
+        &[&winner],
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn rejects_unauthorized_or_mismatched_settlement_links() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 3).await;
+    let winner = Keypair::new();
+    close_round_for_winner(&mut context, market, round_address, &winner, 1_000_000).await;
+    let authorization_address = winner_authorization_address(&round_address);
+
+    let unauthorized = Keypair::new();
+    fund(&mut context, unauthorized.pubkey()).await;
+    let unauthorized_execution = execute_mock_settlement_instruction(
+        unauthorized.pubkey(),
+        market,
+        round_address,
+        authorization_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![unauthorized_execution], &[&unauthorized],)
+            .await
+            .is_err()
+    );
+
+    let wrong_market =
+        create_valid_market(&mut context, MARKET_ID + 1, MAX_NAV_STALENESS_SLOTS).await;
+    let wrong_market_execution = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        wrong_market,
+        round_address,
+        authorization_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![wrong_market_execution], &[&winner])
+            .await
+            .is_err()
+    );
+
+    let original_authorization: WinnerAuthorization =
+        fetch_account(&mut context, authorization_address).await;
+    overwrite_winner_authorization(
+        &mut context,
+        authorization_address,
+        WinnerAuthorization {
+            round: Pubkey::new_unique(),
+            ..original_authorization
+        },
+    );
+    let wrong_round_execution = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        market,
+        round_address,
+        authorization_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![wrong_round_execution], &[&winner])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rejects_settlement_before_round_closes() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 3).await;
+    let authorization_address = winner_authorization_address(&round_address);
+    let (_, bump) =
+        Pubkey::find_program_address(&[WINNER_SEED, round_address.as_ref()], &axis_auction::id());
+    let payer = context.payer.pubkey();
+    overwrite_winner_authorization(
+        &mut context,
+        authorization_address,
+        WinnerAuthorization {
+            round: round_address,
+            market,
+            winner: payer,
+            bid_amount: 1_000_000,
+            issued_slot: 0,
+            consumed: false,
+            bump,
+        },
+    );
+
+    let execution =
+        execute_mock_settlement_instruction(payer, market, round_address, authorization_address);
+    assert!(process_instructions(&mut context, vec![execution], &[])
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn rejects_stale_or_constraint_failing_settlement() {
+    let mut stale_context = program_test().start_with_context().await;
+    let (stale_market, stale_round) = open_valid_round(&mut stale_context, 3).await;
+    let stale_winner = Keypair::new();
+    close_round_for_winner(
+        &mut stale_context,
+        stale_market,
+        stale_round,
+        &stale_winner,
+        1_000_000,
+    )
+    .await;
+    let stale_market_state: MockDtfMarket = fetch_account(&mut stale_context, stale_market).await;
+    stale_context
+        .warp_to_slot(
+            stale_market_state.nav_last_update_slot
+                + stale_market_state.max_nav_staleness_slots
+                + 1,
+        )
+        .unwrap();
+    let stale_execution = execute_mock_settlement_instruction(
+        stale_winner.pubkey(),
+        stale_market,
+        stale_round,
+        winner_authorization_address(&stale_round),
+    );
+    assert!(
+        process_instructions(&mut stale_context, vec![stale_execution], &[&stale_winner])
+            .await
+            .is_err()
+    );
+
+    let mut min_out_context = program_test().start_with_context().await;
+    let (min_out_market, min_out_round) = open_round_with_settlement_constraints(
+        &mut min_out_context,
+        MARKET_ID + 2,
+        1_040_000_001,
+        MIN_IMPROVEMENT_BPS,
+    )
+    .await;
+    let min_out_winner = Keypair::new();
+    close_round_for_winner(
+        &mut min_out_context,
+        min_out_market,
+        min_out_round,
+        &min_out_winner,
+        1_000_000,
+    )
+    .await;
+    let min_out_execution = execute_mock_settlement_instruction(
+        min_out_winner.pubkey(),
+        min_out_market,
+        min_out_round,
+        winner_authorization_address(&min_out_round),
+    );
+    assert!(process_instructions(
+        &mut min_out_context,
+        vec![min_out_execution],
+        &[&min_out_winner],
+    )
+    .await
+    .is_err());
+
+    let mut improvement_context = program_test().start_with_context().await;
+    let (improvement_market, improvement_round) = open_round_with_settlement_constraints(
+        &mut improvement_context,
+        MARKET_ID + 3,
+        MIN_SETTLEMENT_OUT,
+        8_001,
+    )
+    .await;
+    let improvement_winner = Keypair::new();
+    close_round_for_winner(
+        &mut improvement_context,
+        improvement_market,
+        improvement_round,
+        &improvement_winner,
+        1_000_000,
+    )
+    .await;
+    let improvement_execution = execute_mock_settlement_instruction(
+        improvement_winner.pubkey(),
+        improvement_market,
+        improvement_round,
+        winner_authorization_address(&improvement_round),
+    );
+    assert!(process_instructions(
+        &mut improvement_context,
+        vec![improvement_execution],
+        &[&improvement_winner],
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn rejects_math_overflow_during_settlement() {
+    let mut context = program_test().start_with_context().await;
+    initialize_valid_config(&mut context).await;
+    let market_id = MARKET_ID + 4;
+    let create = create_overflow_market_instruction(context.payer.pubkey(), market_id);
+    process_instructions(&mut context, vec![create], &[])
+        .await
+        .unwrap();
+
+    let market = market_address(market_id);
+    let round_address = round_address(&market, 0);
+    let open = open_auction_round_instruction(context.payer.pubkey(), market, 0, 3);
+    process_instructions(&mut context, vec![open], &[])
+        .await
+        .unwrap();
+
+    let winner = Keypair::new();
+    close_round_for_winner(&mut context, market, round_address, &winner, 1_000_000).await;
+    let execution = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        market,
+        round_address,
+        winner_authorization_address(&round_address),
+    );
+    assert!(
+        process_instructions(&mut context, vec![execution], &[&winner])
+            .await
+            .is_err()
+    );
 }
