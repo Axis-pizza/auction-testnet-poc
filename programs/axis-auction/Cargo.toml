@@ -8,6 +8,15 @@ repository.workspace = true
 [lib]
 name = "axis_auction"
 path = "src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[features]
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
 
 [dependencies]
-
+anchor-lang = "=0.31.1"

@@ -9,3 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Axis-pizza/axis-auction-testnet-poc"
 
+# Required by Anchor's SBF build guard and appropriate for arithmetic-heavy
+# on-chain code: release overflows must trap rather than wrap.
+[profile.release]
+overflow-checks = true
