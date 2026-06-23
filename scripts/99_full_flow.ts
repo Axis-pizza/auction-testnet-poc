@@ -16,7 +16,12 @@ void runScenario("99_full_flow", async (client, recorder) => {
   await submitBids(client, recorder, { market, auctionRound });
   await closeAuctionSelectWinner(client, recorder, { market, auctionRound });
   await executeMockSettlement(client, recorder, { market, auctionRound });
-  await recordAuctionPayment(client, recorder, { market, auctionRound });
+  const { auctionSummary } = await recordAuctionPayment(client, recorder, {
+    market,
+    auctionRound,
+  });
 
   console.log(`Completed market ${market.toBase58()}, round ${roundIndex.toString()}.`);
+  console.log("Auction economics summary:");
+  console.log(JSON.stringify(auctionSummary, null, 2));
 }).catch(reportScenarioError);

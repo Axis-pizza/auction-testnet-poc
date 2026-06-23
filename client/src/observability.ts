@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { AxisClient } from "./program";
+import { AuctionSummary } from "./summary";
 
 export interface TransactionExecutionMeta {
   label: string;
@@ -24,13 +25,16 @@ export interface TransactionExecutionMeta {
 }
 
 export interface RunOutput {
-  schemaVersion: 1;
+  // schemaVersion 1 = transactions only (backward compatible); schemaVersion 2
+  // adds the auctionSummary block when economics have been attached.
+  schemaVersion: 1 | 2;
   runName: string;
   generatedAt: string;
   cluster: string;
   rpcUrl: string;
   programId: string;
   transactions: TransactionExecutionMeta[];
+  auctionSummary?: AuctionSummary;
 }
 
 function csvCell(value: string | number | null): string {
@@ -57,6 +61,7 @@ function calculatePriorityFeeLamports(microLamports: number, computeUnitLimit: n
 
 export class RunRecorder {
   private readonly records: TransactionExecutionMeta[] = [];
+  private auctionSummary: AuctionSummary | null = null;
 
   public constructor(
     private readonly client: AxisClient,
@@ -67,15 +72,25 @@ export class RunRecorder {
     this.records.push(metadata);
   }
 
+  /**
+   * Attach an auction economics summary to this run. Doing so promotes the
+   * JSON output to schemaVersion 2; runs without a summary stay at version 1
+   * so existing consumers keep working unchanged.
+   */
+  public attachAuctionSummary(summary: AuctionSummary): void {
+    this.auctionSummary = summary;
+  }
+
   public write(): { jsonPath: string; csvPath: string } {
     const output: RunOutput = {
-      schemaVersion: 1,
+      schemaVersion: this.auctionSummary ? 2 : 1,
       runName: this.runName,
       generatedAt: new Date().toISOString(),
       cluster: this.client.config.cluster,
       rpcUrl: this.client.config.rpcUrl,
       programId: this.client.program.programId.toBase58(),
       transactions: this.records,
+      ...(this.auctionSummary ? { auctionSummary: this.auctionSummary } : {}),
     };
     const directory = resolve(process.cwd(), "out");
     mkdirSync(directory, { recursive: true });

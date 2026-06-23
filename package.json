@@ -12,6 +12,7 @@
     "close-select-winner": "tsx scripts/05_close_select_winner.ts",
     "execute-settlement": "tsx scripts/06_execute_settlement.ts",
     "record-payment": "tsx scripts/07_record_payment.ts",
+    "fetch-summary": "tsx scripts/08_fetch_auction_summary.ts",
     "full-flow": "tsx scripts/99_full_flow.ts"
   },
   "dependencies": {

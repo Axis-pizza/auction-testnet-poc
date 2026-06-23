@@ -10,6 +10,9 @@
 /out/
 /.anchor/
 
+# Local validator ledger
+/test-ledger/
+
 # Secrets / keypairs / wallets
 .env
 .env.*

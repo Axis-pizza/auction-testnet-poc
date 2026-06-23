@@ -11,6 +11,7 @@ import {
   buildSubmitBid,
 } from "./instructions";
 import { RunRecorder, sendAndConfirmWithMeta } from "./observability";
+import { AuctionSummary, fetchAuctionSummary } from "./summary";
 import {
   deriveConfigPda,
   deriveMarketPda,
@@ -215,7 +216,7 @@ export async function recordAuctionPayment(
   client: AxisClient,
   recorder: RunRecorder,
   addresses = currentAddresses(client, client.config),
-): Promise<void> {
+): Promise<{ auctionSummary: AuctionSummary }> {
   const instruction = await buildClaimOrRecordAuctionPayment(client, {
     recorder: client.payer.publicKey,
     market: addresses.market,
@@ -225,4 +226,10 @@ export async function recordAuctionPayment(
     label: "claim_or_record_auction_payment",
     instruction,
   });
+
+  // Read-only follow-up: fetch the now-final SettlementReceipt and revenue
+  // vaults and attach the auction economics summary to the observability run.
+  const auctionSummary = await fetchAuctionSummary(client, addresses);
+  recorder.attachAuctionSummary(auctionSummary);
+  return { auctionSummary };
 }
