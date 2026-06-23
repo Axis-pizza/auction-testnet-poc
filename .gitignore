@@ -1,0 +1,28 @@
+# Rust / Anchor build outputs
+/target/
+/programs/*/target/
+**/*.so
+**/*.dylib
+**/*.rlib
+
+# Node / client outputs
+/node_modules/
+/out/
+/.anchor/
+
+# Secrets / keypairs / wallets
+.env
+.env.*
+*.keypair.json
+*-keypair.json
+id.json
+wallet.json
+**/id.json
+**/wallet.json
+**/*keypair*.json
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
