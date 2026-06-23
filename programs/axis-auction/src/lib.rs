@@ -4,9 +4,9 @@
 
 //! Axis Auction Testnet POC.
 //!
-//! T0-6 adds mock settlement execution and immutable receipt accounting.
-//! Payment, deployment, and external liquidity integrations remain out of
-//! scope until later milestones.
+//! T0-7 adds record-only auction-payment accounting. Token transfers,
+//! deployment, and external liquidity integrations remain out of scope until
+//! later milestones.
 
 use anchor_lang::prelude::*;
 
@@ -23,8 +23,9 @@ use instructions::*;
 
 /// Axis Auction program surface.
 ///
-/// T0-6 establishes config/market/round creation, bidding, winner
-/// authorization, and mock settlement execution only.
+/// T0-7 establishes config/market/round creation, bidding, winner
+/// authorization, mock settlement execution, and record-only payment
+/// accounting only.
 #[program]
 pub mod axis_auction {
     use super::*;
@@ -91,5 +92,11 @@ pub mod axis_auction {
 
     pub fn execute_mock_settlement(ctx: Context<ExecuteMockSettlement>) -> Result<()> {
         instructions::execute_mock_settlement::execute_mock_settlement(ctx)
+    }
+
+    pub fn claim_or_record_auction_payment(
+        ctx: Context<ClaimOrRecordAuctionPayment>,
+    ) -> Result<()> {
+        instructions::claim_or_record_auction_payment::claim_or_record_auction_payment(ctx)
     }
 }

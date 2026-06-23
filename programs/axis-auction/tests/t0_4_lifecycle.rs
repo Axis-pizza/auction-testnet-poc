@@ -3,6 +3,7 @@ use std::error::Error;
 use anchor_lang::{AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas};
 use axis_auction::{
     accounts::{
+        ClaimOrRecordAuctionPayment as ClaimOrRecordAuctionPaymentAccounts,
         CloseAuctionSelectWinner as CloseAuctionSelectWinnerAccounts,
         CreateMockMarket as CreateMockMarketAccounts,
         ExecuteMockSettlement as ExecuteMockSettlementAccounts,
@@ -14,6 +15,7 @@ use axis_auction::{
         PROTOCOL_VAULT_SEED, RECEIPT_SEED, ROUND_SEED, WINNER_SEED,
     },
     instruction::{
+        ClaimOrRecordAuctionPayment as ClaimOrRecordAuctionPaymentInstruction,
         CloseAuctionSelectWinner as CloseAuctionSelectWinnerInstruction,
         CreateMockMarket as CreateMockMarketInstruction,
         ExecuteMockSettlement as ExecuteMockSettlementInstruction,
@@ -319,6 +321,30 @@ fn execute_mock_settlement_instruction(
     }
 }
 
+fn claim_or_record_auction_payment_instruction(
+    recorder: Pubkey,
+    market: Pubkey,
+    round: Pubkey,
+    receipt: Pubkey,
+    protocol_revenue_vault: Pubkey,
+    creator_revenue_vault: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: axis_auction::id(),
+        accounts: ClaimOrRecordAuctionPaymentAccounts {
+            recorder,
+            config: config_address(),
+            market,
+            auction_round: round,
+            settlement_receipt: receipt,
+            protocol_revenue_vault,
+            creator_revenue_vault,
+        }
+        .to_account_metas(None),
+        data: ClaimOrRecordAuctionPaymentInstruction {}.data(),
+    }
+}
+
 async fn process_instructions(
     context: &mut ProgramTestContext,
     instructions: Vec<Instruction>,
@@ -432,6 +458,61 @@ fn overwrite_winner_authorization(
         rent_epoch: 0,
     };
     context.set_account(&address, &AccountSharedData::from(account));
+}
+
+fn overwrite_settlement_receipt(
+    context: &mut ProgramTestContext,
+    address: Pubkey,
+    receipt: SettlementReceipt,
+) {
+    let mut data = Vec::new();
+    receipt.try_serialize(&mut data).unwrap();
+    let account = Account {
+        lamports: 10_000_000,
+        data,
+        owner: axis_auction::id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+    context.set_account(&address, &AccountSharedData::from(account));
+}
+
+fn overwrite_protocol_revenue_vault(
+    context: &mut ProgramTestContext,
+    address: Pubkey,
+    vault: ProtocolRevenueVault,
+) {
+    let mut data = Vec::new();
+    vault.try_serialize(&mut data).unwrap();
+    let account = Account {
+        lamports: 10_000_000,
+        data,
+        owner: axis_auction::id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+    context.set_account(&address, &AccountSharedData::from(account));
+}
+
+async fn settle_round_for_winner(
+    context: &mut ProgramTestContext,
+    market: Pubkey,
+    round_address: Pubkey,
+    winner: &Keypair,
+    bid_amount: u64,
+) -> Pubkey {
+    close_round_for_winner(context, market, round_address, winner, bid_amount).await;
+    let authorization_address = winner_authorization_address(&round_address);
+    let execute = execute_mock_settlement_instruction(
+        winner.pubkey(),
+        market,
+        round_address,
+        authorization_address,
+    );
+    process_instructions(context, vec![execute], &[winner])
+        .await
+        .unwrap();
+    receipt_address(&round_address)
 }
 
 async fn open_round_with_settlement_constraints(
@@ -1060,6 +1141,189 @@ async fn rejects_math_overflow_during_settlement() {
     );
     assert!(
         process_instructions(&mut context, vec![execution], &[&winner])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn record_only_payment_updates_vault_accounting_once() {
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 3).await;
+    let winner = Keypair::new();
+    let receipt_address =
+        settle_round_for_winner(&mut context, market, round_address, &winner, 1_000_000).await;
+    let receipt: SettlementReceipt = fetch_account(&mut context, receipt_address).await;
+    let protocol_vault_address = protocol_vault_address();
+    let creator_vault_address = creator_vault_address(&market);
+
+    let payment = claim_or_record_auction_payment_instruction(
+        context.payer.pubkey(),
+        market,
+        round_address,
+        receipt_address,
+        protocol_vault_address,
+        creator_vault_address,
+    );
+    process_instructions(&mut context, vec![payment], &[])
+        .await
+        .unwrap();
+
+    let round: AuctionRound = fetch_account(&mut context, round_address).await;
+    let protocol_vault: ProtocolRevenueVault =
+        fetch_account(&mut context, protocol_vault_address).await;
+    let creator_vault: CreatorRevenueVault =
+        fetch_account(&mut context, creator_vault_address).await;
+    assert!(round.payment_recorded);
+    assert_eq!(protocol_vault.total_in, receipt.protocol_revenue);
+    assert_eq!(creator_vault.total_in, receipt.creator_revenue);
+    assert_eq!(
+        protocol_vault.total_in + creator_vault.total_in,
+        receipt.auction_revenue
+    );
+    assert_eq!(protocol_vault.token_account, Pubkey::default());
+    assert_eq!(creator_vault.token_account, Pubkey::default());
+
+    let second_payment = claim_or_record_auction_payment_instruction(
+        context.payer.pubkey(),
+        market,
+        round_address,
+        receipt_address,
+        protocol_vault_address,
+        creator_vault_address,
+    );
+    // Ensure ProgramTest executes the second request instead of returning the
+    // cached success result of the first identical transaction.
+    let nonce_transfer = system_instruction::transfer(&context.payer.pubkey(), &winner.pubkey(), 1);
+    assert!(
+        process_instructions(&mut context, vec![nonce_transfer, second_payment], &[])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rejects_payment_before_settlement_and_with_mismatched_accounts() {
+    let mut pre_settlement_context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut pre_settlement_context, 3).await;
+    let receipt_address = receipt_address(&round_address);
+    let (_, bump) =
+        Pubkey::find_program_address(&[RECEIPT_SEED, round_address.as_ref()], &axis_auction::id());
+    let recorder = pre_settlement_context.payer.pubkey();
+    overwrite_settlement_receipt(
+        &mut pre_settlement_context,
+        receipt_address,
+        SettlementReceipt {
+            round: round_address,
+            market,
+            winner: recorder,
+            pre_nav: PRE_NAV,
+            target_nav: TARGET_NAV,
+            mock_pool_price: MOCK_POOL_PRICE,
+            batch_size: BATCH_SIZE,
+            expected_cost_without_auction: EXPECTED_COST_WITHOUT_AUCTION,
+            starting_gap_value: 0,
+            settlement_out: 0,
+            settlement_cost: 0,
+            winner_bid_amount: 1_000_000,
+            auction_revenue: 1_000_000,
+            gap_closed_value: 0,
+            gross_cost_reduction: 0,
+            total_value_recaptured: 0,
+            protocol_revenue: 200_000,
+            creator_revenue: 800_000,
+            net_protocol_benefit: 0,
+            net_creator_benefit: 0,
+            improvement_bps: 0,
+            settled_slot: 0,
+            bump,
+        },
+    );
+    let early_payment = claim_or_record_auction_payment_instruction(
+        recorder,
+        market,
+        round_address,
+        receipt_address,
+        protocol_vault_address(),
+        creator_vault_address(&market),
+    );
+    assert!(
+        process_instructions(&mut pre_settlement_context, vec![early_payment], &[])
+            .await
+            .is_err()
+    );
+
+    let mut context = program_test().start_with_context().await;
+    let (market, round_address) = open_valid_round(&mut context, 3).await;
+    let winner = Keypair::new();
+    let receipt_address =
+        settle_round_for_winner(&mut context, market, round_address, &winner, 1_000_000).await;
+    let protocol_vault_address = protocol_vault_address();
+    let creator_vault_address = creator_vault_address(&market);
+
+    let protocol_vault: ProtocolRevenueVault =
+        fetch_account(&mut context, protocol_vault_address).await;
+    let wrong_protocol_vault = Pubkey::new_unique();
+    overwrite_protocol_revenue_vault(
+        &mut context,
+        wrong_protocol_vault,
+        ProtocolRevenueVault {
+            authority: protocol_vault.authority,
+            usdc_mint: protocol_vault.usdc_mint,
+            token_account: protocol_vault.token_account,
+            total_in: 0,
+            bump: 0,
+        },
+    );
+    let wrong_vault_payment = claim_or_record_auction_payment_instruction(
+        context.payer.pubkey(),
+        market,
+        round_address,
+        receipt_address,
+        wrong_protocol_vault,
+        creator_vault_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![wrong_vault_payment], &[])
+            .await
+            .is_err()
+    );
+
+    let wrong_market =
+        create_valid_market(&mut context, MARKET_ID + 10, MAX_NAV_STALENESS_SLOTS).await;
+    let wrong_market_payment = claim_or_record_auction_payment_instruction(
+        context.payer.pubkey(),
+        wrong_market,
+        round_address,
+        receipt_address,
+        protocol_vault_address,
+        creator_vault_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![wrong_market_payment], &[])
+            .await
+            .is_err()
+    );
+
+    let original_receipt: SettlementReceipt = fetch_account(&mut context, receipt_address).await;
+    overwrite_settlement_receipt(
+        &mut context,
+        receipt_address,
+        SettlementReceipt {
+            round: Pubkey::new_unique(),
+            ..original_receipt
+        },
+    );
+    let wrong_round_payment = claim_or_record_auction_payment_instruction(
+        context.payer.pubkey(),
+        market,
+        round_address,
+        receipt_address,
+        protocol_vault_address,
+        creator_vault_address,
+    );
+    assert!(
+        process_instructions(&mut context, vec![wrong_round_payment], &[])
             .await
             .is_err()
     );

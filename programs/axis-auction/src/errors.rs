@@ -50,4 +50,6 @@ pub enum AxisAuctionError {
     InvalidMinImprovementBps,
     #[msg("The winner authorization bid amount does not match the auction round.")]
     BidMismatch,
+    #[msg("The auction round has not been settled.")]
+    AuctionNotSettled,
 }
