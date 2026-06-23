@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-axis_auction = "AxisAuct111111111111111111111111111111111111"
+axis_auction = "2uB7Hm4yxMwvRWU19QXCvTF9LzTSVrqSGooDYcCZXD7r"
 
 [programs.testnet]
-axis_auction = "AxisAuct111111111111111111111111111111111111"
+axis_auction = "2uB7Hm4yxMwvRWU19QXCvTF9LzTSVrqSGooDYcCZXD7r"
 
 [provider]
 cluster = "testnet"
